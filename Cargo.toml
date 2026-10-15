@@ -1,0 +1,23 @@
+[package]
+name = "ps4_battery_monitor"
+version = "1.0.0"
+edition = "2021"
+description = "PS4 DualShock 4 Akku-Monitor fuer Windows (Bluetooth)"
+
+[[bin]]
+name = "ps4_battery_monitor"
+path = "src/main.rs"
+
+[dependencies]
+# HID-Zugriff (hidapi C-Bibliothek, statisch gelinkt)
+hidapi = { version = "2.6", features = ["windows-native"] }
+
+# Native Windows-Toast-Benachrichtigungen (WinRT)
+winrt-notification = "0.5"
+
+[profile.release]
+opt-level    = "z"    # Minimale Binaergroesse
+lto          = true   # Link-Time-Optimierung
+codegen-units = 1     # Bestes Optimierungspotenzial
+strip        = true   # Debug-Symbole entfernen
+panic        = "abort" # Kein Unwinding -> kleinere .exe
