@@ -1,65 +1,59 @@
 # PS4 Controller Battery Monitor for Windows 🎮🔋
 
-Ein leichtgewichtiger Hintergrund-Monitor für Windows, der den Akkustand eines über Bluetooth verbundenen **Sony DualShock 4 Controllers (PS4)** überwacht und bei niedrigem Ladestand eine native Windows-Benachrichtigung anzeigt.
+A lightweight, resource-friendly Windows background utility that monitors the battery level of your **Sony DualShock 4 (PS4)** controller over Bluetooth. Features a **System Tray icon** with real-time status and native Windows Toast notifications when the battery is running low.
 
 ---
 
 ## ✨ Features
 
-- 🪶 **Extrem ressourcenschonend:** ~0 % CPU-Last. Das Programm schläft 5 Minuten und liest nur kurz das Controller-HID-Paket aus.
-- 🔕 **Kein störendes Konsolenfenster:** Läuft unauffällig im Hintergrund (`#![windows_subsystem = "windows"]`).
-- 🔔 **Native Windows-Benachrichtigung:** Sendet einen Toast-Alarm, wenn der Akku **≤ 20 %** fällt und nicht geladen wird.
-- ⏱️ **Cooldown-Logik:** Benachrichtigt frühestens alle 30 Minuten erneut, um Spam zu verhindern.
-- 🔌 **Plug & Play:** Funktioniert ohne Treiberinstallation oder Zusatzsoftware (nutzt Windows HID & WinRT).
+- 🪶 **Ultra-low Resource Footprint:** ~0.0% CPU usage and only ~4-5 MB of RAM. Sleeps in the background and only wakes up periodically to poll HID data.
+- 📌 **Windows System Tray Icon:** Hover over the tray icon in the taskbar to immediately see the current battery percentage and charging state (e.g., `PS4 Controller: 80 %` or `PS4 Controller: 50 % (Charging)`).
+- 🛑 **Context Menu:** Right-click the tray icon to easily view status or cleanly exit the application with one click.
+- 🔔 **Native Windows Notifications:** Sends a non-intrusive Windows Toast notification when the controller drops to **≤ 20%** and is not plugged in.
+- ⏱️ **Notification Cooldown:** Reminds you at most once every 30 minutes to prevent alert spam.
+- 🔕 **No Annoying Console Window:** Runs silently as a true Windows GUI background process (`#![windows_subsystem = "windows"]`).
 
 ---
 
-## 🔍 Wie funktioniert das? (Technische Details)
+## 🔍 How It Works (Technical Details)
 
-Der DualShock 4 sendet über Bluetooth standardmäßig HID-Input-Reports (*Human Interface Device*).
+The DualShock 4 communicates via standard Bluetooth HID (*Human Interface Device*) input reports.
 
 - **Vendor ID:** `0x054C` (Sony Interactive Entertainment)
-- **Product ID:** `0x09CC` (DualShock 4 USB Wireless Adapter / Bluetooth Controller v2)
+- **Product ID:** `0x09CC` (DualShock 4 Bluetooth / Wireless Controller)
 
-Im Bluetooth-Report enthält **Byte 30** den aktuellen Status:
-- **Bits 0–3:** Akkustand als diskreter Wert von `0` bis `10` (`Wert * 10 = Prozent`).
-- **Bit 4:** Ladestatus (`1` = Controller wird geladen, `0` = Batteriebetrieb).
+In the 64-byte Bluetooth report, **Byte 30** contains the battery and charging information:
+- **Bits 0–3:** Battery level as a discrete integer from `0` to `10` (`level * 10 = percentage`).
+- **Bit 4:** Charging flag (`1` = plugged into USB / charging, `0` = discharging on battery).
 
 ```text
-Byte 30:  [Bit 7..5] [Bit 4: Charging] [Bits 3..0: Level 0-10]
+Byte 30:  [Bit 7..5: Reserved] [Bit 4: Charging] [Bits 3..0: Level (0-10)]
 ```
 
 ---
 
-## 🚀 Installation & Ausführung
+## 🚀 Installation & Usage
 
-### Option 1: Fertige `.exe` nutzen
-1. Lade die kompilierte `ps4_battery_monitor.exe` aus den Releases herunter.
-2. Doppelklick zum Starten (läuft unsichtbar im Hintergrund).
-3. *(Optional)* Lege eine Verknüpfung in deinen Windows Autostart-Ordner (`Win + R` → `shell:startup`), damit das Tool beim PC-Start automatisch aktiv ist.
+### Option 1: Pre-built Binary
+1. Download `ps4_battery_monitor.exe` from the latest release.
+2. Double-click to start. The icon will appear in your system tray (bottom-right taskbar near the clock).
+3. *(Optional Autostart)* Press `Win + R`, type `shell:startup`, and place a shortcut to the `.exe` inside.
 
-### Option 2: Selbst kompilieren
-Voraussetzung: Ein installiertes [Rust Toolchain](https://rustup.rs/).
+### Option 2: Build from Source
+Requires [Rust](https://rustup.rs/) installed.
 
 ```bash
-# Repository klonen
+# Clone the repository
 git clone https://github.com/Milagres65/PS4_Controller_Battery.git
 cd PS4_Controller_Battery
 
-# Im Release-Modus bauen
+# Build release binary
 cargo build --release
 ```
 
-Die fertige Datei befindet sich anschließend unter `target/release/ps4_battery_monitor.exe`.
+The compiled standalone executable will be located at `target/release/ps4_battery_monitor.exe` (approx. 230 KB).
 
 ---
 
-## 🛑 Beenden des Monitors
-Da die Anwendung ohne GUI/Fenster läuft, kann sie bei Bedarf einfach über den **Windows Task-Manager** beendet werden:
-- Task-Manager öffnen (`Strg + Umschalt + Esc`)
-- Den Prozess `ps4_battery_monitor.exe` suchen und auf **Task beenden** klicken.
-
----
-
-## 📄 Lizenz
-MIT License / Open Source.
+## 📄 License
+MIT License
