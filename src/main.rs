@@ -11,12 +11,13 @@
 #![windows_subsystem = "windows"]
 
 use hidapi::HidApi;
+use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
-use tray_item::{IconSource, TrayItem};
+use tray_icon::{Icon, TrayIconBuilder};
 
 // ── Konfiguration ────────────────────────────────────────────
 const VENDOR_ID: u16        = 0x054C;        // Sony
@@ -70,7 +71,6 @@ fn read_controller_status(
     last_notify: &mut Option<Instant>,
     cooldown: &Duration,
 ) -> ControllerStatus {
-    // Falls noch keine HidApi-Instanz existiert, einmalig initialisieren
     if api.is_none() {
         if let Ok(new_api) = HidApi::new() {
             *api = Some(new_api);
@@ -82,7 +82,6 @@ fn read_controller_status(
         None => return ControllerStatus::Disconnected,
     };
 
-    // Geraeteliste neu einlesen
     let _ = hid.refresh_devices();
 
     let device = match hid.open(VENDOR_ID, PRODUCT_ID) {
@@ -95,7 +94,6 @@ fn read_controller_status(
         Ok(n) if n > BATTERY_BYTE => {
             let (percent, charging) = parse_battery(buf[BATTERY_BYTE]);
 
-            // Pruefe Cooldown fuer Windows Toast Notification
             let cooldown_elapsed = last_notify
                 .map(|t| t.elapsed() >= *cooldown)
                 .unwrap_or(true);
@@ -111,34 +109,78 @@ fn read_controller_status(
     }
 }
 
+// ── Dynamische Icon-Generierung ──────────────────────────────
+
+/// Erzeugt ein schickes 32x32 RGBA-Icon fuer die Taskleiste.
+/// Ein minimalistisches Controller-/Batterie-Design.
+fn create_tray_icon() -> Icon {
+    const W: u32 = 32;
+    const H: u32 = 32;
+    let mut rgba = vec![0u8; (W * H * 4) as usize];
+
+    for y in 0..H {
+        for x in 0..W {
+            let idx = ((y * W + x) * 4) as usize;
+
+            // Zeichne ein abgerundetes Rechteck (Batterie-Körper)
+            let in_body = x >= 4 && x <= 26 && y >= 8 && y <= 24;
+            let in_tip = x >= 27 && x <= 29 && y >= 13 && y <= 19;
+
+            let border = (in_body && (x == 4 || x == 26 || y == 8 || y == 24))
+                || (in_tip && (x == 29 || y == 13 || y == 19));
+
+            let fill = in_body && x >= 7 && x <= 20 && y >= 11 && y <= 21;
+
+            if border {
+                rgba[idx] = 230;     // R
+                rgba[idx + 1] = 230; // G
+                rgba[idx + 2] = 230; // B
+                rgba[idx + 3] = 255; // Alpha
+            } else if fill {
+                rgba[idx] = 0;       // R
+                rgba[idx + 1] = 168; // G (Sattes PS-Blau/Gruen)
+                rgba[idx + 2] = 255; // B
+                rgba[idx + 3] = 255; // Alpha
+            }
+        }
+    }
+
+    Icon::from_rgba(rgba, W, H).expect("Valid icon RGBA data")
+}
+
 // ── Hauptprogramm ────────────────────────────────────────────
 
 fn main() {
-    // 1. Tray-Icon in der Windows-Taskleiste registrieren
-    let mut tray = match TrayItem::new("PS4 Controller: Initialisiere...", IconSource::Resource("tray-default")) {
+    // 1. Kontext-Menue mit `muda` aufbauen
+    let tray_menu = Menu::new();
+    let header_item = MenuItem::new("PS4 Controller Monitor", false, None);
+    let separator = PredefinedMenuItem::separator();
+    let exit_item = MenuItem::new("Beenden", true, None);
+    let exit_id = exit_item.id().clone();
+
+    let _ = tray_menu.append_items(&[&header_item, &separator, &exit_item]);
+
+    // 2. Tray-Icon registrieren
+    let icon = create_tray_icon();
+    let tray_icon = match TrayIconBuilder::new()
+        .with_tooltip("PS4 Controller: Initialisiere...")
+        .with_icon(icon)
+        .with_menu(Box::new(tray_menu))
+        .build()
+    {
         Ok(t) => t,
-        Err(_) => return,
+        Err(e) => {
+            eprintln!("TrayIcon build failed: {:?}", e);
+            return;
+        }
     };
 
-    // Beenden-Kanal fuer das Menue
-    let (exit_tx, exit_rx): (Sender<()>, Receiver<()>) = channel();
     let is_running = Arc::new(AtomicBool::new(true));
 
-    // Rechtsklick-Menue: Info-Zeile & Beenden
-    let _ = tray.add_label("PS4 Controller Monitor");
-    
-    let exit_tx_clone = exit_tx.clone();
-    let is_running_clone = Arc::clone(&is_running);
-    let _ = tray.add_menu_item("Beenden", move || {
-        is_running_clone.store(false, Ordering::SeqCst);
-        let _ = exit_tx_clone.send(());
-    });
-
-    // Kanal fuer Status-Updates vom Hintergrund-Worker zum Tray
+    // 3. Worker-Thread fuer periodische Controller-Abfrage starten
     let (status_tx, status_rx): (Sender<ControllerStatus>, Receiver<ControllerStatus>) = channel();
-
-    // 2. Hintergrund-Thread fuer Controller-Abfrage starten
     let worker_running = Arc::clone(&is_running);
+
     thread::spawn(move || {
         let mut api: Option<HidApi> = None;
         let mut last_notify: Option<Instant> = None;
@@ -148,7 +190,7 @@ fn main() {
             let status = read_controller_status(&mut api, &mut last_notify, &cooldown_dur);
             let _ = status_tx.send(status);
 
-            // Schlafen in kleinen Haeppchen (insgesamt 10s), damit das Beenden sofort reagiert
+            // In 500ms-Schritten schlafen, damit Beenden sofort reagiert
             for _ in 0..(CHECK_INTERVAL * 2) {
                 if !worker_running.load(Ordering::SeqCst) {
                     break;
@@ -158,37 +200,54 @@ fn main() {
         }
     });
 
-    // 3. Haupt-Schleife fuer Tray-Aktualisierung
+    // 4. Windows GUI Event-Loop auf dem Hauptthread (Win32 Message Pump)
+    let menu_channel = MenuEvent::receiver();
     let mut last_tooltip = String::new();
 
-    loop {
-        // Wurde im Kontextmenue "Beenden" geklickt?
-        if exit_rx.try_recv().is_ok() || !is_running.load(Ordering::SeqCst) {
-            break;
-        }
+    unsafe {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
+        };
 
-        // Neue Statusmeldung vom Hintergrundthread verarbeiten
-        while let Ok(status) = status_rx.try_recv() {
-            let new_tooltip = match status {
-                ControllerStatus::Disconnected => "PS4 Controller: Nicht verbunden".to_string(),
-                ControllerStatus::Connected { percent, charging } => {
-                    if charging {
-                        format!("PS4 Controller: {} % (Laedt)", percent)
-                    } else {
-                        format!("PS4 Controller: {} %", percent)
-                    }
-                }
-            };
+        let mut msg: MSG = std::mem::zeroed();
 
-            // Tooltip nur aktualisieren, wenn sich der Text geaendert hat
-            if new_tooltip != last_tooltip {
-                let _ = tray.inner_mut().set_tooltip(&new_tooltip);
-                last_tooltip = new_tooltip;
+        while is_running.load(Ordering::SeqCst) {
+            // A. Windows Messages verarbeiten (Tray Hover, Clicks etc.)
+            while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
             }
-        }
 
-        // Hauptthread schlaeft kurz (verhindert Busy-Waiting -> 0 % CPU)
-        thread::sleep(Duration::from_millis(200));
+            // B. Menue-Klicks (z. B. "Beenden") pruefen
+            if let Ok(event) = menu_channel.try_recv() {
+                if event.id == exit_id {
+                    is_running.store(false, Ordering::SeqCst);
+                    break;
+                }
+            }
+
+            // C. Status-Updates vom Hintergrund-Thread verarbeiten
+            while let Ok(status) = status_rx.try_recv() {
+                let new_tooltip = match status {
+                    ControllerStatus::Disconnected => "PS4 Controller: Nicht verbunden".to_string(),
+                    ControllerStatus::Connected { percent, charging } => {
+                        if charging {
+                            format!("PS4 Controller: {} % (Laedt)", percent)
+                        } else {
+                            format!("PS4 Controller: {} %", percent)
+                        }
+                    }
+                };
+
+                if new_tooltip != last_tooltip {
+                    let _ = tray_icon.set_tooltip(Some(&new_tooltip));
+                    last_tooltip = new_tooltip;
+                }
+            }
+
+            // D. Schlafen, um CPU-Auslastung auf exakt 0,0 % zu halten
+            thread::sleep(Duration::from_millis(50));
+        }
     }
 }
 

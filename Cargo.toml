@@ -11,7 +11,9 @@ path = "src/main.rs"
 [dependencies]
 # HID-Zugriff (hidapi C-Bibliothek, statisch gelinkt)
 hidapi = { version = "2.6", features = ["windows-native"] }
-tray-item = "0.10.0"
+muda = { version = "0.21.2", default-features = false }
+tray-icon = { version = "0.26.1", default-features = false }
+windows-sys = { version = "0.61.2", features = ["Win32_UI_WindowsAndMessaging"] }
 
 # Native Windows-Toast-Benachrichtigungen (WinRT)
 winrt-notification = "0.5"
