@@ -22,12 +22,17 @@ The DualShock 4 communicates via standard Bluetooth HID (*Human Interface Device
 - **Vendor ID:** `0x054C` (Sony Interactive Entertainment)
 - **Product ID:** `0x09CC` (DualShock 4 Bluetooth / Wireless Controller)
 
-In the 64-byte Bluetooth report, **Byte 30** contains the battery and charging information:
+The battery byte depends on how the controller is connected:
+
+- **USB report `0x01`:** Byte 30
+- **Bluetooth report `0x11`:** Byte 32
+
+In either report, the battery byte contains the battery and charging information:
 - **Bits 0–3:** Battery level as a discrete integer from `0` to `10` (`level * 10 = percentage`).
-- **Bit 4:** Charging flag (`1` = plugged into USB / charging, `0` = discharging on battery).
+- **Bits 4–5:** Charging state (`0` = discharging, `1` = charging, `2` = fully charged).
 
 ```text
-Byte 30:  [Bit 7..5: Reserved] [Bit 4: Charging] [Bits 3..0: Level (0-10)]
+Battery byte: [Bits 7..6: Reserved] [Bits 5..4: Charge state] [Bits 3..0: Level (0-10)]
 ```
 
 ---

@@ -24,7 +24,8 @@ use tray_icon::{Icon, TrayIconBuilder};
 const VENDOR_ID: u16        = 0x054C;        // Sony
 const PRODUCT_ID_V2: u16    = 0x09CC;        // DualShock 4 V2
 const PRODUCT_ID_V1: u16    = 0x05C4;        // DualShock 4 V1
-const BATTERY_BYTE: usize   = 30;            // Byte-Index im HID-Report
+const USB_BATTERY_BYTE: usize = 30;          // Byte-Index im USB-Report 0x01
+const BT_BATTERY_BYTE: usize  = 32;          // Byte-Index im Bluetooth-Report 0x11
 const LOW_THRESHOLD: u8     = 20;            // Warnschwelle in Prozent
 const CHECK_INTERVAL: u64   = 10;            // Pruefintervall: 10 Sekunden
 const NOTIFY_COOLDOWN: u64  = 30 * 60;       // Toast-Cooldown: 30 Minuten
@@ -40,23 +41,32 @@ enum ControllerStatus {
 
 // ── Akku-Parsing ─────────────────────────────────────────────
 
-/// Parst den Rohwert von Byte 30 des HID-Reports.
+/// Parst den Akkustand aus einem DS4 USB- oder Bluetooth-HID-Report.
 ///
 /// Bit 0-3 : Akkustand (0-10), wobei 10 = 100 % (oder 11 wenn voll)
-/// Bit 4-7 : Ladestatus
+/// Bit 4-5 : Ladestatus
 ///   - 0x0 : Entladen (Normaler Akkubetrieb)
 ///   - 0x1 : Laedt gerade ueber Kabel
 ///   - 0x2 : Vollstaendig geladen (am Kabel)
-fn parse_battery(raw: u8) -> (u8, bool) {
+fn parse_battery_report(report: &[u8]) -> Option<(u8, bool)> {
+    let battery_byte = match *report.first()? {
+        0x01 => USB_BATTERY_BYTE,
+        0x11 => BT_BATTERY_BYTE,
+        _ => return None,
+    };
+    let raw = *report.get(battery_byte)?;
     let level = raw & 0x0F;
-    let charge_status = (raw >> 4) & 0x0F;
+    let charge_status = (raw >> 4) & 0x03;
+    if charge_status > 2 {
+        return None;
+    }
     let charging = charge_status == 1 || charge_status == 2;
     let percent = if charge_status == 2 || level >= 10 {
         100
     } else {
         (level * 10).min(100)
     };
-    (percent, charging)
+    Some((percent, charging))
 }
 
 // ── Windows-Benachrichtigung ─────────────────────────────────
@@ -111,8 +121,11 @@ fn read_controller_status(
 
     let mut buf = [0u8; 128];
     match device.read_timeout(&mut buf, HID_READ_TIMEOUT) {
-        Ok(n) if n > BATTERY_BYTE => {
-            let (percent, charging) = parse_battery(buf[BATTERY_BYTE]);
+        Ok(n) => {
+            let (percent, charging) = match parse_battery_report(&buf[..n]) {
+                Some(status) => status,
+                None => return ControllerStatus::Disconnected,
+            };
 
             let cooldown_elapsed = last_notify
                 .map(|t| t.elapsed() >= *cooldown)
@@ -125,7 +138,48 @@ fn read_controller_status(
 
             ControllerStatus::Connected { percent, charging }
         }
-        _ => ControllerStatus::Disconnected,
+        Err(_) => ControllerStatus::Disconnected,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_battery_report;
+
+    #[test]
+    fn parses_bluetooth_battery_from_byte_32() {
+        let mut report = [0; 33];
+        report[0] = 0x11;
+        report[30] = 0;
+        report[32] = 0x08;
+
+        assert_eq!(parse_battery_report(&report), Some((80, false)));
+    }
+
+    #[test]
+    fn parses_usb_battery_from_byte_30() {
+        let mut report = [0; 31];
+        report[0] = 0x01;
+        report[30] = 0x05;
+
+        assert_eq!(parse_battery_report(&report), Some((50, false)));
+    }
+
+    #[test]
+    fn recognizes_charging_and_full_states() {
+        let mut report = [0; 33];
+        report[0] = 0x11;
+        report[32] = 0x18;
+        assert_eq!(parse_battery_report(&report), Some((80, true)));
+
+        report[32] = 0x20;
+        assert_eq!(parse_battery_report(&report), Some((100, true)));
+    }
+
+    #[test]
+    fn rejects_short_and_unknown_reports() {
+        assert_eq!(parse_battery_report(&[0x11; 32]), None);
+        assert_eq!(parse_battery_report(&[0x02; 40]), None);
     }
 }
 
