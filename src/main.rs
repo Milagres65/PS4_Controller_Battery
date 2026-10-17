@@ -57,7 +57,7 @@ fn parse_battery_report(report: &[u8]) -> Option<(u8, bool)> {
     let raw = *report.get(battery_byte)?;
     let level = raw & 0x0F;
     let charge_status = (raw >> 4) & 0x03;
-    if charge_status > 2 {
+    if level > 11 || charge_status > 2 {
         return None;
     }
     let charging = charge_status == 1 || charge_status == 2;
@@ -110,36 +110,45 @@ fn read_controller_status(
 
     let _ = hid.refresh_devices();
 
-    // Versuche V2, falls nicht vorhanden V1
-    let device = match hid.open(VENDOR_ID, PRODUCT_ID_V2) {
-        Ok(dev) => dev,
-        Err(_) => match hid.open(VENDOR_ID, PRODUCT_ID_V1) {
-            Ok(dev) => dev,
-            Err(_) => return ControllerStatus::Disconnected,
-        },
-    };
+    // A VID/PID can expose several HID collections. Try each path because
+    // HidApi::open() chooses an unspecified first match.
+    let devices: Vec<_> = hid
+        .device_list()
+        .filter(|info| {
+            info.vendor_id() == VENDOR_ID
+                && (info.product_id() == PRODUCT_ID_V2 || info.product_id() == PRODUCT_ID_V1)
+        })
+        .cloned()
+        .collect();
 
-    let mut buf = [0u8; 128];
-    match device.read_timeout(&mut buf, HID_READ_TIMEOUT) {
-        Ok(n) => {
-            let (percent, charging) = match parse_battery_report(&buf[..n]) {
-                Some(status) => status,
-                None => return ControllerStatus::Disconnected,
-            };
+    for info in devices {
+        let device = match info.open_device(hid) {
+            Ok(device) => device,
+            Err(_) => continue,
+        };
+        let mut buf = [0u8; 128];
+        let n = match device.read_timeout(&mut buf, HID_READ_TIMEOUT) {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        let (percent, charging) = match parse_battery_report(&buf[..n]) {
+            Some(status) => status,
+            None => continue,
+        };
 
-            let cooldown_elapsed = last_notify
-                .map(|t| t.elapsed() >= *cooldown)
-                .unwrap_or(true);
+        let cooldown_elapsed = last_notify
+            .map(|t| t.elapsed() >= *cooldown)
+            .unwrap_or(true);
 
-            if percent <= LOW_THRESHOLD && !charging && cooldown_elapsed {
-                send_low_battery_notification(percent);
-                *last_notify = Some(Instant::now());
-            }
-
-            ControllerStatus::Connected { percent, charging }
+        if percent <= LOW_THRESHOLD && !charging && cooldown_elapsed {
+            send_low_battery_notification(percent);
+            *last_notify = Some(Instant::now());
         }
-        Err(_) => ControllerStatus::Disconnected,
+
+        return ControllerStatus::Connected { percent, charging };
     }
+
+    ControllerStatus::Disconnected
 }
 
 #[cfg(test)]
@@ -180,6 +189,17 @@ mod tests {
     fn rejects_short_and_unknown_reports() {
         assert_eq!(parse_battery_report(&[0x11; 32]), None);
         assert_eq!(parse_battery_report(&[0x02; 40]), None);
+    }
+
+    #[test]
+    fn handles_full_and_rejects_impossible_battery_levels() {
+        let mut report = [0; 33];
+        report[0] = 0x11;
+        report[32] = 0x0B;
+        assert_eq!(parse_battery_report(&report), Some((100, false)));
+
+        report[32] = 0x0C;
+        assert_eq!(parse_battery_report(&report), None);
     }
 }
 

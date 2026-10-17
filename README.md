@@ -17,7 +17,7 @@ A lightweight, resource-friendly Windows background utility that monitors the ba
 
 ## 🔍 How It Works (Technical Details)
 
-The DualShock 4 communicates via standard Bluetooth HID (*Human Interface Device*) input reports.
+The DualShock 4 communicates via USB or Bluetooth HID (*Human Interface Device*) input reports. The monitor checks each matching HID collection and accepts only reports with a recognized DS4 report ID and a valid battery level.
 
 - **Vendor ID:** `0x054C` (Sony Interactive Entertainment)
 - **Product ID:** `0x09CC` (DualShock 4 Bluetooth / Wireless Controller)
@@ -28,7 +28,7 @@ The battery byte depends on how the controller is connected:
 - **Bluetooth report `0x11`:** Byte 32
 
 In either report, the battery byte contains the battery and charging information:
-- **Bits 0–3:** Battery level as a discrete integer from `0` to `10` (`level * 10 = percentage`).
+- **Bits 0–3:** Battery level as a discrete integer from `0` to `10` (`level * 10 = percentage`); `11` is also treated as full.
 - **Bits 4–5:** Charging state (`0` = discharging, `1` = charging, `2` = fully charged).
 
 ```text
