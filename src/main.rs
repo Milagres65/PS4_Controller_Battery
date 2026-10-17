@@ -11,7 +11,7 @@
 
 #![windows_subsystem = "windows"]
 
-use hidapi::HidApi;
+use hidapi::{BusType, HidApi};
 use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -30,6 +30,7 @@ const LOW_THRESHOLD: u8     = 20;            // Warnschwelle in Prozent
 const CHECK_INTERVAL: u64   = 10;            // Pruefintervall: 10 Sekunden
 const NOTIFY_COOLDOWN: u64  = 30 * 60;       // Toast-Cooldown: 30 Minuten
 const HID_READ_TIMEOUT: i32 = 200;           // HID Lese-Timeout in ms
+const MAX_REPORTS_TO_READ: usize = 10;       // BT kann erst generische Reports liefern
 
 // ── Datenstrukturen ──────────────────────────────────────────
 
@@ -48,10 +49,10 @@ enum ControllerStatus {
 ///   - 0x0 : Entladen (Normaler Akkubetrieb)
 ///   - 0x1 : Laedt gerade ueber Kabel
 ///   - 0x2 : Vollstaendig geladen (am Kabel)
-fn parse_battery_report(report: &[u8]) -> Option<(u8, bool)> {
-    let battery_byte = match *report.first()? {
-        0x01 => USB_BATTERY_BYTE,
-        0x11 => BT_BATTERY_BYTE,
+fn parse_battery_report(report: &[u8], bus_type: BusType) -> Option<(u8, bool)> {
+    let battery_byte = match (bus_type, *report.first()?) {
+        (BusType::Usb, 0x01) => USB_BATTERY_BYTE,
+        (BusType::Bluetooth, 0x11) => BT_BATTERY_BYTE,
         _ => return None,
     };
     let raw = *report.get(battery_byte)?;
@@ -110,8 +111,7 @@ fn read_controller_status(
 
     let _ = hid.refresh_devices();
 
-    // A VID/PID can expose several HID collections. Try each path because
-    // HidApi::open() chooses an unspecified first match.
+    // A VID/PID can expose several HID collections; open each path explicitly.
     let devices: Vec<_> = hid
         .device_list()
         .filter(|info| {
@@ -122,16 +122,24 @@ fn read_controller_status(
         .collect();
 
     for info in devices {
+        let bus_type = info.bus_type();
         let device = match info.open_device(hid) {
             Ok(device) => device,
             Err(_) => continue,
         };
         let mut buf = [0u8; 128];
-        let n = match device.read_timeout(&mut buf, HID_READ_TIMEOUT) {
-            Ok(n) => n,
-            Err(_) => continue,
-        };
-        let (percent, charging) = match parse_battery_report(&buf[..n]) {
+        let mut battery_status = None;
+        for _ in 0..MAX_REPORTS_TO_READ {
+            let n = match device.read_timeout(&mut buf, HID_READ_TIMEOUT) {
+                Ok(n) => n,
+                Err(_) => break,
+            };
+            battery_status = parse_battery_report(&buf[..n], bus_type);
+            if battery_status.is_some() {
+                break;
+            }
+        }
+        let (percent, charging) = match battery_status {
             Some(status) => status,
             None => continue,
         };
@@ -154,6 +162,7 @@ fn read_controller_status(
 #[cfg(test)]
 mod tests {
     use super::parse_battery_report;
+    use hidapi::BusType;
 
     #[test]
     fn parses_bluetooth_battery_from_byte_32() {
@@ -162,7 +171,10 @@ mod tests {
         report[30] = 0;
         report[32] = 0x08;
 
-        assert_eq!(parse_battery_report(&report), Some((80, false)));
+        assert_eq!(
+            parse_battery_report(&report, BusType::Bluetooth),
+            Some((80, false))
+        );
     }
 
     #[test]
@@ -171,7 +183,10 @@ mod tests {
         report[0] = 0x01;
         report[30] = 0x05;
 
-        assert_eq!(parse_battery_report(&report), Some((50, false)));
+        assert_eq!(
+            parse_battery_report(&report, BusType::Usb),
+            Some((50, false))
+        );
     }
 
     #[test]
@@ -179,16 +194,42 @@ mod tests {
         let mut report = [0; 33];
         report[0] = 0x11;
         report[32] = 0x18;
-        assert_eq!(parse_battery_report(&report), Some((80, true)));
+        assert_eq!(
+            parse_battery_report(&report, BusType::Bluetooth),
+            Some((80, true))
+        );
 
         report[32] = 0x20;
-        assert_eq!(parse_battery_report(&report), Some((100, true)));
+        assert_eq!(
+            parse_battery_report(&report, BusType::Bluetooth),
+            Some((100, true))
+        );
     }
 
     #[test]
     fn rejects_short_and_unknown_reports() {
-        assert_eq!(parse_battery_report(&[0x11; 32]), None);
-        assert_eq!(parse_battery_report(&[0x02; 40]), None);
+        assert_eq!(parse_battery_report(&[0x11; 32], BusType::Bluetooth), None);
+        assert_eq!(parse_battery_report(&[0x02; 40], BusType::Usb), None);
+    }
+
+    #[test]
+    fn rejects_generic_bluetooth_gamepad_reports() {
+        let mut report = [0; 128];
+        report[0] = 0x01;
+
+        assert_eq!(parse_battery_report(&report, BusType::Bluetooth), None);
+    }
+
+    #[test]
+    fn parses_live_bluetooth_report_shape() {
+        let mut report = [0; 128];
+        report[0] = 0x11;
+        report[32] = 0x05;
+
+        assert_eq!(
+            parse_battery_report(&report, BusType::Bluetooth),
+            Some((50, false))
+        );
     }
 
     #[test]
@@ -196,10 +237,13 @@ mod tests {
         let mut report = [0; 33];
         report[0] = 0x11;
         report[32] = 0x0B;
-        assert_eq!(parse_battery_report(&report), Some((100, false)));
+        assert_eq!(
+            parse_battery_report(&report, BusType::Bluetooth),
+            Some((100, false))
+        );
 
         report[32] = 0x0C;
-        assert_eq!(parse_battery_report(&report), None);
+        assert_eq!(parse_battery_report(&report, BusType::Bluetooth), None);
     }
 }
 
